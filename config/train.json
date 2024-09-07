@@ -1,0 +1,25 @@
+{
+    "distributed":{
+        "random_seed": 42
+    },
+    "model":{
+
+    },
+    "dataset":{
+        "data": "cifar",
+        "train_batch_size": 32
+    },
+    "training":{
+        "sampling": "iid",
+        "total_clients": 50,
+        "clients": 5,
+        "global_epochs": 5,
+        "local_epochs": 10,
+        "lr": 0.001,
+        "gamma": 0.5
+    },
+    "wandb":{
+        "logging": false,
+        "run_name": "train-SFPrompt"
+    }
+}
