@@ -13,12 +13,12 @@ def dataset_iid(dataset, num_users = None):
 def dataset_noniid(dataset, config):
     num_dataset = len(dataset)
     idx = np.arange(num_dataset)
-    dict_users = {i: list() for i in range(config["training"]["clients"])}
+    dict_users = {i: list() for i in range(config["training"]["total_clients"])}
 
     min_num = 100
     max_num = 700
 
-    random_num_size = np.random.randint(min_num, max_num+1, size=config["training"]["clients"])
+    random_num_size = np.random.randint(min_num, max_num+1, size=config["training"]["total_clients"])
     print(f"Total number of datasets owned by client: {sum(random_num_size)}")
 
     assert num_dataset >= sum(random_num_size)
