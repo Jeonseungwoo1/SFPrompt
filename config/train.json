@@ -11,6 +11,7 @@
         "val_split": 0.2
     },
     "training":{
+        "clip":0.0,
         "sampling": "iid",
         "total_clients": 50,
         "clients": 5,
@@ -22,11 +23,17 @@
         "save_interval": 10000,
         "work_dir": "./trained_models/train-SFPrompt"
     },
+    "optimizer":{
+        "lr": 0.001,
+        "adam_beta1": 0.9,
+        "adam_beta2": 0.999,
+        "adam_epsilon": 1e-8
+    },
     "prompt":{
         "patch": 16,
         "num_token": 5,
         "hidden_size": 768,
-        "dropout_rate":0.1,
+        "dropout_rate":0.3,
         "mlp_dom": 3072,
         "num_heads": 12,
         "num_layers": 12,
@@ -36,7 +43,7 @@
         "representation_size": "None"
     },
     "wandb":{
-        "logging": false,
+        "logging": "False",
         "run_name": "train-SFPrompt"
     }
 }
