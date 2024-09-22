@@ -14,7 +14,7 @@
         "sampling": "iid",
         "total_clients": 50,
         "clients": 5,
-        "global_epochs": 5,
+        "global_epochs": 200,
         "local_epochs": 10,
         "lr": 0.001,
         "gamma": 0.5,
