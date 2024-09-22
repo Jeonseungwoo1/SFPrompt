@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from transformers import ViTModel, ViTConfig
+
 
 from torch.nn.modules.utils import _pair
 from torch.nn import Dropout, Softmax, Linear, Conv2d, LayerNorm
@@ -8,79 +8,64 @@ from os.path import join as pjoin
 import copy
 import math
 
-"""class head_model(nn.Module):
-    def __init__(self, vit_model, num_layers):
-        super(head_model, self).__init__()
-        self.patch_embdding = vit_model.embeddings
-        self.transformer_layers = nn.ModuleList(vit_model.encoder.layer[:num_layers])
 
+class Embeddings(nn.Module):
+    """Construct the embeddings from patch, position embeddings.
+    """
+    def __init__(self, config, img_size, in_channels=3):
+        super(Embeddings, self).__init__()
+        #self.hybrid = None
 
-    def forward(self, x):
-        x = self.patch_embdding(x)
-        for layer in self.transformer_layers:
-            x = layer(x)
+        patch_size = (16, 16)  # Set patch size to 4x4
+        n_patches = (img_size[0] // patch_size[0]) * (img_size[1] // patch_size[1])
+        self.patch_embeddings = Conv2d(in_channels=in_channels,
+                                       out_channels=config["prompt"]["hidden_size"],
+                                       kernel_size=patch_size,
+                                       stride=patch_size)
+        self.position_embeddings = nn.Parameter(torch.zeros(1, n_patches + 1, config["prompt"]["hidden_size"]))
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, config["prompt"]["hidden_size"]))
 
-        return x
-    
-
-class body_model(nn.Module):
-    def __init__(self, vit_model, start_layer, end_layer):
-        super(body_model, self).__init__()
-        self.transformer_layers = nn.ModuleList(vit_model.encoder.layer[start_layer:end_layer])
-
-    def forward(self, x):
-        for layer in self.transformer_layers:
-            x = layer(x)
-        return x
-
-
-class tail_model(nn.Module):
-    def __init__(self, vit_model, num_classes):
-        super(tail_model, self).__init__()
-
-        self.transformer_layers = nn.ModuleList(vit_model.encoder.layer[-1:])
-
-    def forward(self, x):
-        for layer in self.transformer_layers:
-            x = layer(x)
-
-        x = self.layernorm(x)
-        x = x[:, 0]
-        x = self.classifier(x)
-        return x    
-
-
-#이게 맞는지 모르겠음
-class prompt_module(nn.Module):
-    def __init__(self, prompt_length,  embedding_dim):
-        super(prompt_module, self).__init__()
-        self.prompt = nn.Parameter(torch.randn(prompt_length, embedding_dim))
-
-
-    def forward(self, x):
-        batch_size = x.size(0)
-        prompt = self.prompt_unsqueeze(0).expand(batch_size, -1, -1)
-        return torch.cat((prompt,x), dim=1)"""
-
-class Head(nn.Module):
-    def __init__(self, config):
-        super(Head, self).__init__()
-        self.embeddings = nn.Linear(config["prompt"]["hidden_size"], config["prompt"]["hidden_size"])
-        self.cls_token = nn.Parameter(torch.zeros(1,1, config["prompt"]["hidden_size"]))
         self.dropout = nn.Dropout(config["prompt"]["dropout_rate"])
 
-        self.config = config
+
+    def forward(self, x):
+        B = x.shape[0]
+        cls_tokens = self.cls_token.expand(B, -1, -1)
+        x = self.patch_embeddings(x)
+        x = x.flatten(2)
+        x = x.transpose(-1, -2)
+        x = torch.cat((cls_tokens, x), dim=1)
+
+        embeddings = x + self.position_embeddings
+        embeddings = self.dropout(embeddings)
+        return embeddings
+
+class Head(nn.Module):
+    def __init__(self, config, img_size, in_channels=3):
+        super(Head, self).__init__()
+
+        # Indent consistently with 4 spaces
+        self.embeddings = Embeddings(config, img_size, in_channels)
+
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, config["prompt"]["hidden_size"]))
+        self.dropout = nn.Dropout(config["prompt"]["dropout_rate"])
+
         self.prompt_embeddings = nn.Parameter(torch.zeros(1, config["prompt"]["num_token"], config["prompt"]["hidden_size"]))
         nn.init.uniform_(self.prompt_embeddings.data, -0.1, 0.1)
     
     def forward(self, x):
         B = x.size(0)
-        cls_tokens = self.cls_token.expend(B, -1, -1)
 
+        # Get the patch and position embeddings from the Embeddings class
+        patch_embeddings = self.embeddings(x)
+
+        # Expand prompt tokens to match the batch size
         prompt_tokens = self.prompt_embeddings.expand(B, -1, -1)
 
-        x = torch.cat((cls_tokens, prompt_tokens, x), dim=1)
-        x = self.dropout(self.embeddings(x))
+        # Concatenate cls_token, prompt_tokens, and patch_embeddings
+        x = torch.cat((self.cls_token.expand(B, -1, -1), prompt_tokens, patch_embeddings), dim=1)
+
+        x = self.dropout(x)
 
         return x
     

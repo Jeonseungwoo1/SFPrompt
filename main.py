@@ -12,8 +12,8 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 from utils.experiment import AverageMeter, load_config
 from utils.optimizer import get_optimizer
-from dataset import load_data, get_dataloader, dataset_pruning
-from network import head_model, body_model, tail_model, Head, Body, Tail
+from dataset import load_data, dataset_pruning
+from network import Head, Body, Tail
 from src.update import Local_loss_update, DatasetSplit
 
 
@@ -25,164 +25,95 @@ def FedAvg(wt):
         wt_avg[k] = torch.div(wt_avg[k], len(wt))
     
     return wt_avg
-    
-def server_forward_propagation(fx_client, body_model):
-    body_model.eval()
-    
-    server_fx = body_model(fx_client)
-
-    return server_fx
-
-def server_backward_propagation(dfx_client, body_model, server_fx, y):
-    body_model.train()
-
-    loss = nn.CrossEntropyLoss(server_fx, y)
-    loss.backward(dfx_client)
-    dfx_server = server_fx.grad.clone().detach()
-    
-    return dfx_server
-
-
-## SplitLoRA 처럼 구현 바꾸기
-
-"""class Client(object):
-    def __init__(self, head_model, tail_model, body_model, prompt_module, idx, lr, device, dataset = None, idxs = None, config = None):
-        self.idx = idx
-        self.device = device
-        self.lr = lr
-        self.head = head_model
-        self.tail = tail_model
-        self.body = body_model
-        self.prompt = prompt_module
-        self.config = config
-        self.ldr_train = DataLoader(DatasetSplit(dataset, idxs), batch_size=self.config["dataset"]['train_batch_size'], shuffle=True)
-        self.pruned_dataset = self.dataset_pruning()
-
-    def dataset_pruning(self):
-        self.head.eval()
-        self.tail.eval()
-
-        el2n_scores = []
-        dataset_tmp = []
-
-
-        with torch.no_grad():
-            for images, labels in self.ldr_train:
-                head_output = self.head(images)
-
-                logits = self.tail(head_output)
-
-                labels_one_hot = F.one_hot(labels, num_classes=logits.shape[1]).float()
-
-                softmax_output = F.softmax(logits, dim=1)
-                error = softmax_output - labels_one_hot
-
-                el2n_score = torch.norm(error, p=2, dim=1)
-
-                for i in range(len(el2n_score)):
-                    el2n_scores.append(el2n_score[i].item())
-                    dataset_tmp.append((images[i], labels[i]))
-
-
-        sorted_index = sorted(range(len(el2n_scores)), key=lambda i: el2n_scores[i], reverse=True)
-
-        n = len(dataset_tmp)
-        num_to_keep = int(self.config["training"]["gamma"] * n)
-        pruned_dataset = [dataset_tmp[i] for i in sorted_index[:num_to_keep]]
-
-        return pruned_dataset
-    
-    def train(self):
-
-        #Client forward update
-        head_model = copy.deepcopy(self.head)
-        tail_model = copy.deepcopy(self.tail)
-        prompt_module = copy.deepcopy(self.prompt)
-
-        head_model.eval()
-        tail_model.train()
-        prompt_module.train()
-
-        #optimizer 부분 수정 필요
-        optimizer_tail = torch.optim.SGD(tail_model.parameters(), lr = self.lr)
-
-
-        for batch_idx, (images, labels) in enumerate(self.pruned_dataset):
-            images, labels = images.to(self.device), labels.to(self.device)
-            optimizer_tail.zero_grad()
-            optimizer_prompt.zero_grad()
-
-            #client forward update
-            head_output = self.head(images)
-            smashed_data = self.prompt(head_output)
-
-            client_fx = smashed_data.clone().detach().requires_grad_(True)
-
-            #Send smashed data to server and perform server-side forward propagation
-            server_fx = server_forward_propagation(client_fx, body_model)
-
-            #Send server-side smashed data to client and perform tail_model forward propagation
-            fx_server = server_fx.to(self.device)
-            tail_output = self.tail(fx_server)
-
-            loss = nn.CrossEntropyLoss(tail_output, labels)
-
-            #client backward update
-            loss.backward()
-            dfx_client = client_fx.grad.clone().detach()
-            optimizer_tail.step()
-
-            #client update
-            dfx_server = server_backward_propagation(dfx_client, body_model, server_fx, labels)
-            optimizer_prompt.step()
-
-
-        return tail_model, prompt_module"""
-
             
 
 def optimizer_step(
     loss,
-    optimizer1, head_model, hidden_states1,
-    optimizer2, body_model, hidden_states2,
-    optimizer3, tail_model,
-    schedules=None,
-    clip_value=None,
+    head_optimizer, head_model, head_smashed_data,
+    body_optimizer, body_model, body_smashed_data,
+    tail_optimizer, tail_model, tail_grad,
+    config,
     is_update=True
 ):
     # Backward pass through all networks
-    loss.backward()
-
+    loss.backward(retain_graph=True)
+    print(tail_grad)
+    tail_grad.retain_grad()
+    body_smashed_data.retain_grad()
     # Store gradients for hidden states
-    grad1 = hidden_states1.grad.clone().detach()
-    grad2 = hidden_states2.grad.clone().detach()
+    grad1 = tail_grad.grad.clone().detach()
+    grad2 = body_smashed_data.grad.clone().detach()
 
-    # Update model3 (last in the sequence)
-    if is_update and clip_value is not None:
-        torch.nn.utils.clip_grad_norm_(tail_model.parameters(), clip_value)
-    optimizer3.step()
-    optimizer3.zero_grad()
+    # Update model_tail (last in the sequence)
+    if is_update and config["training"]["clip"] > 0:
+        torch.nn.utils.clip_grad_norm_(tail_model.parameters(), config["training"]["clip"])
+    tail_optimizer.step()
+    tail_optimizer.zero_grad()
 
-    # Update model2
-    hidden_states2.backward(grad1)
-    if is_update and clip_value is not None:
-        torch.nn.utils.clip_grad_norm_(body_model.parameters(), clip_value)
-    optimizer2.zero_grad()
+    # Update model_body
+    body_smashed_data.backward(grad1)
+    if is_update and config["training"]["clip"] > 0:
+        torch.nn.utils.clip_grad_norm_(body_model.parameters(), config["training"]["clip"])
+    body_optimizer.zero_grad()
 
-    # Update model1 (first in the sequence)
-    hidden_states1.backward(grad2)
-    if is_update and clip_value is not None:
-        torch.nn.utils.clip_grad_norm_(head_model.parameters(), clip_value)
-    optimizer1.step()
-    optimizer1.zero_grad()
+    # Update model_head (first in the sequence)
+    head_smashed_data.backward(grad2)
+    if is_update and config["training"]["clip"] > 0:
+        torch.nn.utils.clip_grad_norm_(head_model.parameters(), config["training"]["clip"])
+    head_optimizer.step()
+    head_optimizer.zero_grad()
 
 
 
-def evaluate(device, head, body, tail, idxs, dataset_val):
+
+def evaluate(config, device, head, body, tail, idxs, dataset_test):
     device= device
     head.eval()
     body.eval()
     tail.eval()
+
+    correct = 0
+    total = 0 
+    loss_metter = AverageMeter()
+
+    criterion = nn.CrossEntropyLoss()
+
+    with torch.no_grad():
+        for batch_idx, (images, labels) in enumerate(test_loader):
+            images = images.unsqueeze(0)
+            if labels.dim() == 0:
+                labels = labels.unsqueeze(0)
+            images = images.to(device)
+            labels = labels.to(device)
+
+            head_output = head(images)
+            head_smashed_data = head_output.detach()
+
+            body_output = body(head_smashed_data)
+            body_smashed_data = body_output.detach()
+
+            outputs = tail(body_smashed_data)
+
+            loss = criterion(outputs, labels)
+            loss_metter.update(loss.item(), images.size(0))
+
+            _, predicted = torch.max(outputs.data, 1)
+
+            total += labels.size(0)
+            correct += (predicted == labels).sum().item()
+
+    accuracy = 100 * correct / total
+    avg_loss = loss_metter.avg
+
+    print(f'Test Loss: {avg_loss:.4f}, Accuracy: {accuracy:.2f}%')
+
+    if config["wandb"]["logging"]:
+        wandb.log({
+            "test/accuracy": accuracy,
+            "test/loss": avg_loss
+        })
+
+    return avg_loss, accuracy
 
 
 def train(
@@ -191,51 +122,62 @@ def train(
     head,
     body,
     tail,
+    head_weight,
+    tail_weight,
     dataset,
     idxs_users,
     idxs
 ):
-    dataset = DataLoader(DatasetSplit(dataset, idxs), batch_size=config["dataset"]["train_batch_size"], shuffle = True)
+
+
+    head.load_state_dict(head_weight)
+    tail.load_state_dict(tail_weight)
+
+    head = head.to(device)
+    body = body.to(device)
+    tail = tail.to(device)
 
     pruned_dataset = dataset_pruning(
         head_model=head,
         tail_model=tail,
-        batch_size = config["dataset"["train_batch_size"]],
+        batch_size = config["dataset"]["train_batch_size"],
         dataset = dataset,
         idxs = idxs,
-        gamma = config["training"]["gamma"]
+        gamma = config["training"]["gamma"],
+        device=device,
+        config = config
     )
 
     head.train()
     body.train()
     tail.train()
 
-    print("Training Start", config["training"]["epochs"])
+    print("Training Start")
     
 
     device = device
+    
+    for idx, (images, labels) in enumerate(pruned_dataset):
+        images = images.unsqueeze(0).to(device)
+        if labels.dim() == 0:
+                    labels = labels.unsqueeze(0)
+        labels = labels.to(device)
 
-    images = []
-    labels = []
-
-    for batch_idx, (image, label) in pruned_dataset:
-        images.append(image)
-        labels.append(label)
-    for idx, (image, label) in pruned_dataset:
-        images = images.to(device)
         head_output = head(images)
-
+      
         head_smashed_data = head_output.clone().detach().requires_grad_(True)
 
-        body_output = body(head_smashed_data)
+        body_output = body(head_output)
         body_smashed_data = body_output.clone().detach().requires_grad_(True)
 
-        tail_output = tail(body_smashed_data)
-        loss = nn.CrossEntropyLoss(tail_output, labels)
+
+        tail_output = tail(body_output)
+        tail_grad = tail_output.clone().detach().requires_grad_(True)
+
+        loss = nn.CrossEntropyLoss()(tail_output, labels)
 
         head.freeze_non_prompt_parameters()
         head_optimizer = optim.Adam([head.prompt_embeddings], lr=config["training"]["lr"])
-        head_optimizer = get_optimizer(head, config)
         body_optimizer = get_optimizer(body, config)
         tail_optimizer = get_optimizer(tail, config)
     
@@ -243,7 +185,9 @@ def train(
             loss,
             head_optimizer, head, head_smashed_data,
             body_optimizer, body, body_smashed_data,
-            tail_optimizer, tail
+            tail_optimizer, tail, tail_grad,
+
+            config
         )
 
     
@@ -269,12 +213,13 @@ if __name__ == '__main__':
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     dataset_train, dataset_val, dataset_test, dict_users = load_data(config)
-    head = copy.deepcopy(Head)
-    body = copy.deepcopy(Body)
-    tail = copy.deepcopy(Tail)
+    head = Head(config, img_size=(32, 32), in_channels=3)
+    body = Body(config)
+    tail = Tail(config, config["prompt"]["num_classes"])
 
     avg_loss = AverageMeter()
     
+    print(dataset_train)
     log_start_time = time.time()
     #global round
     for iter in range(config["training"]["global_epochs"]):
@@ -283,36 +228,42 @@ if __name__ == '__main__':
             head = global_prompt
             tail = w_glob_tail
 
-        w_local_tail = []
-        w_local_head = []
+        w_local_tail = {}
+        w_local_head = {}
         
-        idxs_users = np.random.choice(range(config["training"]["total_clients"]), config["training"]["clients"], replace=False)
+        #idxs_users = np.random.choice(range(config["training"]["total_clients"]), config["training"]["clients"], replace=False)
+        idxs_users = np.random.choice(list(dict_users.keys()), config["training"]["clients"], replace=False)
+
         
         #Local-loss update
         for idx in idxs_users:
-            w_head, w_tail= Local_loss_update(head, tail, config = config, dataset = dataset_train, idxs=set(list(dict_users[idx])))
+            loss_update= Local_loss_update(head, tail, config = config, device = device, dataset = dataset_train, idxs=set(list(dict_users[idx])))
+            w_head, w_tail= loss_update.update()
             w_local_tail[idx] = copy.deepcopy(w_tail)
             w_local_head[idx] = copy.deepcopy(w_head)
 
+        
         #Split training
         for idx in idxs_users:
             w_local_tail_, w_local_head_, loss= train(
                                             config=config,
                                             device=device,
-                                            head=w_local_head[idx],
-                                            body=body_model,
-                                            tail=w_local_tail[idx],
+                                            head = head,
+                                            body=body,
+                                            tail=tail,
+                                            head_weight=w_local_head[idx],
+                                            tail_weight=w_local_tail[idx],
                                             dataset = dataset_train,
                                             idxs_users=idxs_users,
                                             idxs=set(list(dict_users[idx]))
                                             )
-            w_local_tail.append(copy.deepcopy(w_local_tail_))
-            w_local_head.append(copy.deepcopy(w_local_head_))
+            w_local_tail[idx] = copy.deepcopy(w_local_tail_)
+            w_local_head[idx] = copy.deepcopy(w_local_head_)
             avg_loss.update(loss.item())
 
 
-        w_glob_tail = FedAvg(w_local_tail)
-        global_prompt = FedAvg(w_local_head)
+        w_glob_tail = FedAvg(list(w_local_tail.values()))
+        global_prompt = FedAvg(list(w_local_head.values()))
         elapsed = time.time() - log_start_time
         log_str = {
             f"| epoch {iter:3d} | avg loss {avg_loss.avg:5.2f} |"
@@ -328,6 +279,9 @@ if __name__ == '__main__':
             )
         log_start_time = time.time()
         avg_loss.reset()
+
+    test_loader = DataLoader(dataset_test, batch_size=config["dataset"]["test_batch_size"], shuffle=False)
+    test_loss, test_accuracy = evaluate(config, device, head, body, tail, test_loader)
 
 
      

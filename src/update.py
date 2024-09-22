@@ -30,8 +30,14 @@ class Local_loss_update(object):
         self.pruned_dataset = self.dataset_pruning()
 
     def dataset_pruning(self):
-        self.head.eval()
-        self.tail.eval()
+        head_model = copy.deepcopy(self.head)
+        tail_model = copy.deepcopy(self.tail)
+
+        head_model = head_model.to(self.device)
+        tail_model = tail_model.to(self.device)
+
+        head_model.eval()
+        tail_model.eval()
 
         el2n_scores = []
         dataset_tmp = []
@@ -39,9 +45,11 @@ class Local_loss_update(object):
 
         with torch.no_grad():
             for images, labels in self.dataset:
-                head_output = self.head(images)
+                images = images.to(self.device)
+                labels = labels.to(self.device)
 
-                logits = self.tail(head_output)
+                head_output = head_model(images)
+                logits = tail_model(head_output)
 
                 labels_one_hot = F.one_hot(labels, num_classes=logits.shape[1]).float()
 
@@ -82,12 +90,16 @@ class Local_loss_update(object):
 
         pruned_dataset = self.pruned_dataset
 
+
         for epoch in range(self.config["training"]["local_epochs"]):
             #print(f"Epoch {epoch+1}/{self.config['training']['local_epochs']}")
             for batch_idx, (images,labels) in enumerate(pruned_dataset):
+                images = images.unsqueeze(0)
+                if labels.dim() == 0:
+                    labels = labels.unsqueeze(0)
                 images = images.to(self.device)
                 labels = labels.to(self.device)
-
+                
                 head_output = head_model(images)
                 logits = tail_model(head_output)
 
