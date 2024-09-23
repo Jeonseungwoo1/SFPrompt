@@ -37,12 +37,11 @@ def optimizer_step(
 ):
     # Backward pass through all networks
     loss.backward(retain_graph=True)
-    print(tail_grad)
     tail_grad.retain_grad()
     body_smashed_data.retain_grad()
     # Store gradients for hidden states
-    grad1 = tail_grad.grad.clone().detach()
-    grad2 = body_smashed_data.grad.clone().detach()
+    grad1 = tail_grad.grad
+    grad2 = body_smashed_data.grad
 
     # Update model_tail (last in the sequence)
     if is_update and config["training"]["clip"] > 0:
@@ -51,13 +50,12 @@ def optimizer_step(
     tail_optimizer.zero_grad()
 
     # Update model_body
-    body_smashed_data.backward(grad1)
+    body_smashed_data.mean().backward(grad1, retain_graph=True)
     if is_update and config["training"]["clip"] > 0:
         torch.nn.utils.clip_grad_norm_(body_model.parameters(), config["training"]["clip"])
     body_optimizer.zero_grad()
 
     # Update model_head (first in the sequence)
-    head_smashed_data.backward(grad2)
     if is_update and config["training"]["clip"] > 0:
         torch.nn.utils.clip_grad_norm_(head_model.parameters(), config["training"]["clip"])
     head_optimizer.step()
@@ -86,16 +84,16 @@ def evaluate(config, device, head, body, tail, idxs, dataset_test):
             images = images.to(device)
             labels = labels.to(device)
 
-            head_output = head(images)
+            head_output = head_model(images)
             head_smashed_data = head_output.detach()
 
-            body_output = body(head_smashed_data)
+            body_output = body_model(head_smashed_data)
             body_smashed_data = body_output.detach()
 
-            outputs = tail(body_smashed_data)
+            outputs = tail_model(body_smashed_data)
 
             loss = criterion(outputs, labels)
-            loss_metter.update(loss.item(), images.size(0))
+            loss_meter.update(loss.item(), images.size(0))
 
             _, predicted = torch.max(outputs.data, 1)
 
@@ -103,7 +101,7 @@ def evaluate(config, device, head, body, tail, idxs, dataset_test):
             correct += (predicted == labels).sum().item()
 
     accuracy = 100 * correct / total
-    avg_loss = loss_metter.avg
+    avg_loss = loss_meter.avg
 
     print(f'Test Loss: {avg_loss:.4f}, Accuracy: {accuracy:.2f}%')
 
@@ -193,7 +191,13 @@ def train(
     
     return head.state_dict(), tail.state_dict(), loss
 
+def load_partial_state_dict(model, state_dict):
+    model_dict = model.state_dict()
 
+    state_dict = {k: v for k, v in state_dict.items() if k in model_dict}
+
+    model_dict.update(state_dict)
+    model.load_state_dict(model_dict)
     
 
 if __name__ == '__main__':
@@ -219,14 +223,14 @@ if __name__ == '__main__':
 
     avg_loss = AverageMeter()
     
-    print(dataset_train)
     log_start_time = time.time()
     #global round
+    
     for iter in range(config["training"]["global_epochs"]):
-
+        print(f"Start {iter:3d} Round")
         if iter != 0:
-            head = global_prompt
-            tail = w_glob_tail
+            load_partial_state_dict(head, global_prompt)
+            load_partial_state_dict(tail, w_glob_tail)
 
         w_local_tail = {}
         w_local_head = {}
@@ -236,6 +240,7 @@ if __name__ == '__main__':
 
         
         #Local-loss update
+        print("Start Local Loss Update")
         for idx in idxs_users:
             loss_update= Local_loss_update(head, tail, config = config, device = device, dataset = dataset_train, idxs=set(list(dict_users[idx])))
             w_head, w_tail= loss_update.update()
@@ -244,6 +249,7 @@ if __name__ == '__main__':
 
         
         #Split training
+        print("Start Split Training")
         for idx in idxs_users:
             w_local_tail_, w_local_head_, loss= train(
                                             config=config,
@@ -266,6 +272,7 @@ if __name__ == '__main__':
         global_prompt = FedAvg(list(w_local_head.values()))
         elapsed = time.time() - log_start_time
         log_str = {
+            f"| epoch {iter:3d} | loss {avg_loss.val:5.2f} |"
             f"| epoch {iter:3d} | avg loss {avg_loss.avg:5.2f} |"
         }
         print(log_str)

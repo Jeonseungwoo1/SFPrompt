@@ -92,7 +92,6 @@ class Local_loss_update(object):
 
 
         for epoch in range(self.config["training"]["local_epochs"]):
-            #print(f"Epoch {epoch+1}/{self.config['training']['local_epochs']}")
             for batch_idx, (images,labels) in enumerate(pruned_dataset):
                 images = images.unsqueeze(0)
                 if labels.dim() == 0:
